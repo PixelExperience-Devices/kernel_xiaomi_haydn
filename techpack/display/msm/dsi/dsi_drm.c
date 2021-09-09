@@ -13,6 +13,7 @@
 #include "dsi_drm.h"
 #include "sde_trace.h"
 #include "sde_dbg.h"
+#include "mi_dsi_display.h"
 
 #define to_dsi_bridge(x)     container_of((x), struct dsi_bridge, base)
 #define to_dsi_state(x)      container_of((x), struct dsi_connector_state, base)
@@ -186,7 +187,7 @@ static void dsi_bridge_pre_enable(struct drm_bridge *bridge)
 
 	power_mode = sde_connector_get_lp(c_bridge->display->drm_conn);
 	notify_data.data = &power_mode;
-	notify_data.disp_id = c_bridge->display->display_selection_type;
+	notify_data.disp_id = mi_get_disp_id(c_bridge->display);
 	mi_disp_notifier_call_chain(MI_DISP_DPMS_EARLY_EVENT, &notify_data);
 
 	/* By this point mode should have been validated through mode_fixup */
@@ -318,7 +319,7 @@ static void dsi_bridge_post_disable(struct drm_bridge *bridge)
 
 	power_mode = sde_connector_get_lp(c_bridge->display->drm_conn);
 	notify_data.data = &power_mode;
-	notify_data.disp_id = c_bridge->display->display_selection_type;
+	notify_data.disp_id = mi_get_disp_id(c_bridge->display);
 	mi_disp_notifier_call_chain(MI_DISP_DPMS_EARLY_EVENT, &notify_data);
 
 	SDE_ATRACE_BEGIN("dsi_bridge_post_disable");

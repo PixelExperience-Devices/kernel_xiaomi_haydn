@@ -23,6 +23,7 @@
 #include "dsi_pwr.h"
 #include "sde_dbg.h"
 #include "dsi_parser.h"
+#include "mi_dsi_display.h"
 
 #define to_dsi_display(x) container_of(x, struct dsi_display, host)
 #define INT_BASE_10 10
@@ -1243,6 +1244,7 @@ int dsi_display_set_power(struct drm_connector *connector,
 {
 	struct dsi_display *display = disp;
 	struct mi_disp_notifier notify_data;
+	int disp_id = 0;
 	int rc = 0;
 
 	if (!display || !display->panel) {
@@ -1250,8 +1252,10 @@ int dsi_display_set_power(struct drm_connector *connector,
 		return -EINVAL;
 	}
 
+	disp_id = mi_get_disp_id(display);
+
 	notify_data.data = &power_mode;
-	notify_data.disp_id = display->display_selection_type;
+	notify_data.disp_id = disp_id;
 
 	switch (power_mode) {
 	case SDE_MODE_DPMS_LP1:
