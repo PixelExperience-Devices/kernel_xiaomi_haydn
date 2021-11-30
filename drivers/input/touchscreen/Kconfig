@@ -1313,6 +1313,7 @@ config TOUCHSCREEN_IQS5XX
 
 source "drivers/input/touchscreen/st/Kconfig"
 
+source "drivers/input/touchscreen/focaltech_spi/Kconfig"
 source "drivers/input/touchscreen/focaltech_touch/Kconfig"
 
 source "drivers/input/touchscreen/synaptics_tcm/Kconfig"
