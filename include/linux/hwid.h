@@ -6,7 +6,13 @@
 #define MAX_COUNTRY_SIZE            8
 
 #define HARDWARE_PROJECT_UNKNOWN    0
+#define HARDWARE_PROJECT_J18        1
+#define HARDWARE_PROJECT_K1         2
 #define HARDWARE_PROJECT_K2         3
+#define HARDWARE_PROJECT_K11        4
+#define HARDWARE_PROJECT_K1A        5
+#define HARDWARE_PROJECT_K9         6
+#define HARDWARE_PROJECT_K8         7
 
 #define HW_MAJOR_VERSION_SHIFT      16
 #define HW_MINOR_VERSION_SHIFT      0
@@ -28,7 +34,8 @@ typedef enum {
 	CountryCN = 0x00,
 	CountryGlobal = 0x01,
 	CountryIndia = 0x02,
-	INVALID = 0x03,
+	CountryJapan = 0x03,
+	INVALID = 0x04,
 	CountryIDMax = 0x7FFFFFFF
 } CountryType;
 
@@ -72,5 +79,6 @@ uint32_t get_hw_version_minor(void);
 uint32_t get_hw_version_build(void);
 uint32_t get_hw_project_adc(void);
 uint32_t get_hw_build_adc(void);
+uint32_t get_hw_id_value(void);
 
 #endif

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Module driver for mi project type, build & project adc values read,
+ * HwId Module driver for mi dirver acquire some hwid build info,
  * which is only used for xiaomi corporation internally.
  *
  * Copyright (c) 2020 xiaomi inc.
+ * Copyright (C) 2021 XiaoMi, Inc.
  */
 
 /*****************************************************************************
@@ -19,159 +20,189 @@
 #include <linux/printk.h>
 #include <linux/errno.h>
 #include <linux/err.h>
-#include <soc/qcom/socinfo.h>
-#include <linux/soc/qcom/smem.h>
 #include <linux/hwid.h>
 
 /*****************************************************************************
 * Global variable or extern global variabls
 *****************************************************************************/
-static struct class *cls;
-static struct device *adcdev;
-static int major;
-static struct project_info *pinfo;
+static uint hwid_value;
+module_param(hwid_value, uint, 0444);
+MODULE_PARM_DESC(hwid_value, "xiaomi hwid value correspondingly different build");
+
+static uint project;
+module_param(project, uint, 0444);
+MODULE_PARM_DESC(project, "xiaomi project serial num predefine");
+
+static uint build_adc;
+module_param(build_adc, uint, 0444);
+MODULE_PARM_DESC(build_adc, "xiaomi adc value of build resistance");
+
+static uint project_adc;
+module_param(project_adc, uint, 0444);
+MODULE_PARM_DESC(project_adc, "xiaomi adc value of project resistance");
+
+static struct kobject *hwid_kobj;
+#define hwid_attr(_name) \
+static struct kobj_attribute _name##_attr = {	\
+	.attr	= {				\
+		.name = __stringify(_name),	\
+		.mode = 0444,			\
+	},					\
+	.show	= _name##_show,			\
+	.store	= NULL,				\
+}
 
 /*****************************************************************************
 * Global variable or extern global functions
 *****************************************************************************/
+static ssize_t hwid_project_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "0x%x\n", project);
+}
+
+static ssize_t hwid_value_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "0x%x\n", hwid_value);
+}
+
+static ssize_t hwid_project_adc_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", project_adc);
+}
+
+static ssize_t hwid_build_adc_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n", build_adc);
+}
+
 const char *product_name_get(void)
 {
-	return pinfo != NULL ? pinfo->productname : "dummy";
+	switch (project){
+		case HARDWARE_PROJECT_J18: return "cetus";
+		case HARDWARE_PROJECT_K1:  return "star";
+		case HARDWARE_PROJECT_K8:  return "odin";
+		case HARDWARE_PROJECT_K2:  return "venus";
+		case HARDWARE_PROJECT_K1A: return "mars";
+		case HARDWARE_PROJECT_K9:  return "renoir";
+		case HARDWARE_PROJECT_K11:
+			if ( (uint32_t)CountryIndia == get_hw_country_version())
+				return "haydnin";
+			else
+				return "haydn";
+		default: return "unknown";
+	}
 }
 EXPORT_SYMBOL(product_name_get);
 
-uint32_t get_hw_version_platform(void)
-{
-	return pinfo != NULL ? pinfo->project : 0;
-}
-EXPORT_SYMBOL(get_hw_version_platform);
-
-uint32_t get_hw_country_version(void)
-{
-	return pinfo != NULL ? (pinfo->hw_id & HW_COUNTRY_VERSION_MASK) >> HW_COUNTRY_VERSION_SHIFT : 0;
-}
-EXPORT_SYMBOL(get_hw_country_version);
-
-uint32_t get_hw_version_major(void)
-{
-	return pinfo != NULL ? (pinfo->hw_id & HW_MAJOR_VERSION_MASK) >> HW_MAJOR_VERSION_SHIFT : 0;
-}
-EXPORT_SYMBOL(get_hw_version_major);
-
-uint32_t get_hw_version_minor(void)
-{
-	return pinfo != NULL ? (pinfo->hw_id & HW_MINOR_VERSION_MASK) >> HW_MINOR_VERSION_SHIFT : 0;
-}
-EXPORT_SYMBOL(get_hw_version_minor);
-
-uint32_t get_hw_version_build(void)
-{
-	return pinfo != NULL ? (pinfo->hw_id & HW_BUILD_VERSION_MASK) >> HW_BUILD_VERSION_SHIFT : 0;
-}
-EXPORT_SYMBOL(get_hw_version_build);
-
 uint32_t get_hw_project_adc(void)
 {
-	return pinfo != NULL ? pinfo->pro_r1 : 0;
+	return project_adc;
 }
 EXPORT_SYMBOL(get_hw_project_adc);
 
 uint32_t get_hw_build_adc(void)
 {
-	return pinfo != NULL ? pinfo->hw_r1 : 0;
+	return build_adc;
 }
 EXPORT_SYMBOL(get_hw_build_adc);
 
-static ssize_t xiaomi_adc_show(struct device *dev, struct device_attribute *attr, char *buf)
+uint32_t get_hw_version_platform(void)
 {
-	uint32_t project_adc = get_hw_project_adc();
-	uint32_t build_adc = get_hw_build_adc();
-	if (!project_adc || !build_adc) {
-		pr_err("fail to get adc pairs from socinfo\n");
-		return -ENODATA;
-	}
-
-	return snprintf(buf, PAGE_SIZE, "project_adc:%u build_adc:%u\n", project_adc, build_adc);
+	return project;
 }
+EXPORT_SYMBOL(get_hw_version_platform);
 
-static DEVICE_ATTR(adc_pairs, 0444, xiaomi_adc_show, NULL);
 
-struct file_operations adc_ops = {
-	.owner  = THIS_MODULE,
+uint32_t get_hw_id_value(void)
+{
+	return hwid_value;
+}
+EXPORT_SYMBOL(get_hw_id_value);
+
+uint32_t get_hw_country_version(void)
+{
+	return (hwid_value & HW_COUNTRY_VERSION_MASK) >> HW_COUNTRY_VERSION_SHIFT;
+}
+EXPORT_SYMBOL(get_hw_country_version);
+
+uint32_t get_hw_version_major(void)
+{
+	return (hwid_value & HW_MAJOR_VERSION_MASK) >> HW_MAJOR_VERSION_SHIFT;
+}
+EXPORT_SYMBOL(get_hw_version_major);
+
+uint32_t get_hw_version_minor(void)
+{
+	return (hwid_value & HW_MINOR_VERSION_MASK) >> HW_MINOR_VERSION_SHIFT;
+}
+EXPORT_SYMBOL(get_hw_version_minor);
+
+uint32_t get_hw_version_build(void)
+{
+	return (hwid_value & HW_BUILD_VERSION_MASK) >> HW_BUILD_VERSION_SHIFT;
+}
+EXPORT_SYMBOL(get_hw_version_build);
+
+hwid_attr(hwid_project);
+hwid_attr(hwid_value);
+hwid_attr(hwid_project_adc);
+hwid_attr(hwid_build_adc);
+
+static struct attribute *hwid_attrs[] = {
+	&hwid_project_attr.attr,
+	&hwid_value_attr.attr,
+	&hwid_project_adc_attr.attr,
+	&hwid_build_adc_attr.attr,
+	NULL,
+};
+
+static struct attribute_group attr_group = {
+	.attrs = hwid_attrs,
 };
 
 /*****************************************************************************
-*  Name: xiaomi_adc_init
+*  Name: hwid_module_init
 *****************************************************************************/
-static int __init xiaomi_adc_init(void)
+static int __init hwid_module_init(void)
 {
-	int ret = 0;
-	size_t size;
+	int ret = -ENOMEM;
 
-	pinfo = (struct project_info*) qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_ID_VENDOR1, &size);
-	if (PTR_ERR(pinfo) == -EPROBE_DEFER) {
-		pinfo = NULL;
-		return -EPROBE_DEFER;
-		pr_err("SMEM is not initialized.\n");
+	hwid_kobj = kobject_create_and_add("hwid", NULL);
+	if (!hwid_kobj) {
+		pr_err("hwid: hwid module init failed\n");
+		goto fail;
 	}
 
-	if (IS_ERR(pinfo) || !size) {
-		pr_err("hwid moudle install failed\n");
-		ret = PTR_ERR(pinfo);
-		goto hwid_unreg;
-	}
-
-	cls = class_create(THIS_MODULE, XIAOMI_ADC_CLASS);
-	if (IS_ERR(cls)) {
-		pr_err("Failed to create xiaomi adc class!\n");
-		return PTR_ERR(cls);
-	}
-
-	major = register_chrdev(ADCDEV_MAJOR, XIAOMI_ADC_MODULE, &adc_ops);
-	if (major < 0) {
-		pr_err("Failed to register xiaomi adc char device!\n");
-		ret = major;
-		goto class_unreg;
-	}
-
-	adcdev = device_create(cls, 0, MKDEV(major,ADCDEV_MINOR), NULL, XIAOMI_ADC_DEVICE);
-	if (IS_ERR(adcdev)) {
-		pr_err("Failed to create xiaomi adcdev!\n");
-		ret = -ENODEV;
-		goto chrdev_unreg;
-	}
-
-	ret = sysfs_create_file(&(adcdev->kobj), &dev_attr_adc_pairs.attr);
+	ret = sysfs_create_group(hwid_kobj, &attr_group);
 	if (ret) {
-		pr_err("Failed to export adc pairs to sysfs!\n");
-		goto adcdev_unreg;
+		pr_err("hwid: sysfs register failed\n");
+		goto sys_fail;
 	}
 
-	return ret;
-
-adcdev_unreg:
-	device_destroy(cls, MKDEV(major, ADCDEV_MINOR));
-chrdev_unreg:
-	unregister_chrdev(ADCDEV_MAJOR, XIAOMI_ADC_MODULE);
-class_unreg:
-	class_destroy(cls);
-hwid_unreg:
+sys_fail:
+	kobject_del(hwid_kobj);
+fail:
 	return ret;
 }
 
 /*****************************************************************************
-*  Name: xiaomi_adc_exit
+*  Name: hwid_module_exit
 *****************************************************************************/
-static void __exit xiaomi_adc_exit(void)
+static void __exit hwid_module_exit(void)
 {
-	sysfs_remove_file(&(adcdev->kobj), &dev_attr_adc_pairs.attr);
-	device_destroy(cls, MKDEV(major,ADCDEV_MINOR));
-	unregister_chrdev(ADCDEV_MAJOR, XIAOMI_ADC_MODULE);
-	class_destroy(cls);
+	if (hwid_kobj) {
+		sysfs_remove_group(hwid_kobj, &attr_group);
+		kobject_del(hwid_kobj);
+	}
+	pr_info("hwid: hwid module exit success\n");
 }
 
-subsys_initcall(xiaomi_adc_init);
-module_exit(xiaomi_adc_exit);
+subsys_initcall(hwid_module_init);
+module_exit(hwid_module_exit);
 
 MODULE_AUTHOR("weixiaotian1@xiaomi.com");
 MODULE_DESCRIPTION("Hwid Module Driver for Xiaomi Corporation");
