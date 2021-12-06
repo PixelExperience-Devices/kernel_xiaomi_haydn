@@ -14,6 +14,7 @@
 #include <linux/input.h>
 #include <linux/of_device.h>
 #include <linux/soc/qcom/fsa4480-i2c.h>
+#include <linux/hwid.h>
 #include <sound/core.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
@@ -6633,6 +6634,32 @@ static struct snd_soc_dai_link star_tdm_rx1_cs35l41_dai_link = {
 		SND_SOC_DAILINK_REG(tert_tdm_rx_1_star),
 };
 
+static struct snd_soc_dai_link haydn_tdm_rx0_cs35l41_dai_link = {
+		.name = LPASS_BE_TERT_TDM_RX_0,
+		.stream_name = "Tertiary TDM0 Playback",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.id = MSM_BACKEND_DAI_TERT_TDM_RX_0,
+		.be_hw_params_fixup = msm_be_hw_params_fixup,
+		.ops = &lahaina_tdm_be_ops,
+		.ignore_suspend = 1,
+		.ignore_pmdown_time = 1,
+		SND_SOC_DAILINK_REG(tert_tdm_rx_0_haydn),
+};
+
+static struct snd_soc_dai_link haydn_tdm_rx1_cs35l41_dai_link = {
+		.name = LPASS_BE_TERT_TDM_RX_1,
+		.stream_name = "Tertiary TDM1 Playback",
+		.no_pcm = 1,
+		.dpcm_playback = 1,
+		.id = MSM_BACKEND_DAI_TERT_TDM_RX_1,
+		.be_hw_params_fixup = msm_be_hw_params_fixup,
+		.ops = &lahaina_tdm_be_ops,
+		.ignore_suspend = 1,
+		.ignore_pmdown_time = 1,
+		SND_SOC_DAILINK_REG(tert_tdm_rx_1_haydn),
+};
+
 static struct snd_soc_dai_link msm_wcn_be_dai_links[] = {
 	{
 		.name = LPASS_BE_SLIMBUS_7_RX,
@@ -7613,7 +7640,18 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 									sizeof(star_tdm_rx1_cs35l41_dai_link));
 				}
 			}
-                }
+		}
+		if (get_hw_version_platform() == HARDWARE_PROJECT_K11) {
+			for (i = 0; i < ARRAY_SIZE(msm_common_be_dai_links); i++) {
+				if (!strcmp(msm_common_be_dai_links[i].name, LPASS_BE_TERT_TDM_RX_0)) {
+					memcpy(msm_common_be_dai_links + i, &haydn_tdm_rx0_cs35l41_dai_link,
+									sizeof(haydn_tdm_rx0_cs35l41_dai_link));
+				} else if (!strcmp(msm_common_be_dai_links[i].name, LPASS_BE_TERT_TDM_RX_1)) {
+					memcpy(msm_common_be_dai_links + i, &haydn_tdm_rx1_cs35l41_dai_link,
+									sizeof(haydn_tdm_rx1_cs35l41_dai_link));
+				}
+			}
+		}
 
 		memcpy(msm_lahaina_dai_links + total_links,
 		       msm_common_be_dai_links,
