@@ -1314,6 +1314,7 @@ source "drivers/input/touchscreen/st/Kconfig"
 
 source "drivers/input/touchscreen/focaltech_spi/Kconfig"
 source "drivers/input/touchscreen/focaltech_touch/Kconfig"
+source "drivers/input/touchscreen/xiaomi/Kconfig"
 
 config TOUCHSCREEN_SYNAPTICS_TCM
 	bool "Synaptics TCM Touchscreen Driver"
