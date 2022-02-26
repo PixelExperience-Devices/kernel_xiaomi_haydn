@@ -4,7 +4,7 @@
  * Version: v1.1.3
  *
  * Copyright (c) 2019 AWINIC Technology CO., LTD
- * Copyright (C) 2020 XiaoMi, Inc.
+ * Copyright (C) 2021 XiaoMi, Inc.
  *
  *  Author: Nick Li <zhangzetao@awinic.com.cn>
  *
@@ -261,6 +261,7 @@ static char aw8697_rtp_name[][AW8697_RTP_NAME_MAX] = {
 	{"signal_text_rtp.bin"},
 	{"signal_transition_light_rtp.bin"},
 	{"signal_transition_rtp.bin"},//191
+	{"haptics_video_rtp.bin"},//192
 };
 #endif
 static int CUSTOME_WAVE_ID;
@@ -274,6 +275,7 @@ struct aw8697 *g_aw8697;
  ******************************************************/
 static void aw8697_interrupt_clear(struct aw8697 *aw8697);
 static int aw8697_haptic_trig_enable_config(struct aw8697 *aw8697);
+static int aw8697_haptic_get_vbat(struct aw8697 *aw8697);
 
  /******************************************************
  *
@@ -783,7 +785,25 @@ static int aw8697_haptic_set_bst_peak_cur(struct aw8697 *aw8697,
 
 static int aw8697_haptic_set_gain(struct aw8697 *aw8697, unsigned char gain)
 {
-	aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, gain);
+	int comp_gain = 0;
+
+	if (aw8697->ram_vbat_comp == AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE) {
+		aw8697_haptic_get_vbat(aw8697);
+		pr_debug("%s: ref %d vbat %d ", __func__, AW8697_VBAT_REFER,
+			aw8697->vbat);
+		comp_gain = gain * AW8697_VBAT_REFER / aw8697->vbat;
+		if (comp_gain > (128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN)) {
+			comp_gain = 128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN;
+			pr_debug("%s comp gain limit=%d\n", __func__, comp_gain);
+		}
+		pr_info("%s: enable vbat comp, level = %x comp level = %x",
+			__func__, gain, comp_gain);
+		aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, comp_gain);
+	} else {
+		pr_debug("%s: disable compsensation, vbat=%d, vbat_min=%d, vbat_ref=%d",
+			__func__, aw8697->vbat, AW8697_VBAT_MIN, AW8697_VBAT_REFER);
+		aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, gain);
+	}
 	return 0;
 }
 
@@ -1095,11 +1115,11 @@ static int aw8697_haptic_get_vbat(struct aw8697 *aw8697)
 	aw8697_i2c_read(aw8697, AW8697_REG_VBATDET, &reg_val);
 	aw8697->vbat = 6100 * reg_val / 256;
 	if (aw8697->vbat > AW8697_VBAT_MAX) {
-		aw8697->vbat = AW8697_VBAT_MAX;
+		//aw8697->vbat = AW8697_VBAT_MAX;
 		pr_debug("%s vbat max limit = %dmV\n", __func__, aw8697->vbat);
 	}
 	if (aw8697->vbat < AW8697_VBAT_MIN) {
-		aw8697->vbat = AW8697_VBAT_MIN;
+		//aw8697->vbat = AW8697_VBAT_MIN;
 		pr_debug("%s vbat min limit = %dmV\n", __func__, aw8697->vbat);
 	}
 
@@ -1112,26 +1132,10 @@ static int aw8697_haptic_get_vbat(struct aw8697 *aw8697)
 
 static int aw8697_haptic_ram_vbat_comp(struct aw8697 *aw8697, bool flag)
 {
-	int temp_gain = 0;
-	//pr_info("%s  %d enter\n", __func__, __LINE__);
 	if (flag) {
-		if (aw8697->ram_vbat_comp == AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE) {
-			aw8697_haptic_get_vbat(aw8697);
-			temp_gain =
-			    aw8697->gain * AW8697_VBAT_REFER / aw8697->vbat;
-			if (temp_gain >
-			    (128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN)) {
-				temp_gain =
-				    128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN;
-				pr_debug("%s gain limit=%d\n", __func__,
-					 temp_gain);
-			}
-			aw8697_haptic_set_gain(aw8697, temp_gain);
-		} else {
-			aw8697_haptic_set_gain(aw8697, aw8697->gain);
-		}
+		aw8697->ram_vbat_comp = AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE;
 	} else {
-		aw8697_haptic_set_gain(aw8697, aw8697->gain);
+		aw8697->ram_vbat_comp = AW8697_HAPTIC_RAM_VBAT_COMP_DISABLE;
 	}
 
 	return 0;
@@ -1416,6 +1420,8 @@ static int aw8697_haptic_play_effect_seq(struct aw8697 *aw8697,
 		}
 		if (aw8697->activate_mode == AW8697_HAPTIC_ACTIVATE_RAM_LOOP_MODE) {
 			aw8697_haptic_set_repeat_wav_seq(aw8697, (aw8697->info.effect_id_boundary + 1));
+			aw8697_haptic_effect_strength(aw8697);
+			aw8697_haptic_set_gain(aw8697, aw8697->level);
 			aw8697_haptic_play_repeat_seq(aw8697, true);
 		}
 	}
@@ -1675,11 +1681,10 @@ static void aw8697_rtp_work_routine(struct work_struct *work)
 	if (aw8697->state) {
 		pm_stay_awake(aw8697->dev);
 		if (aw8697->info.bst_vol_ram <= AW8697_MAX_BST_VO)
-			aw8697_haptic_set_bst_vol(aw8697, aw8697->info.bst_vol_ram);
+			aw8697_haptic_set_bst_vol(aw8697, aw8697->info.bst_vol_rtp);
 		else
 			aw8697_haptic_set_bst_vol(aw8697, aw8697->vmax);
 		aw8697_haptic_effect_strength(aw8697);
-		aw8697_haptic_set_gain(aw8697, aw8697->level);
 		aw8697->rtp_init = 0;
 		if (aw8697->is_custom_wave == 0) {
 			aw8697->rtp_file_num =
@@ -1729,6 +1734,9 @@ static void aw8697_rtp_work_routine(struct work_struct *work)
 		}
 		aw8697->rtp_init = 1;
 
+		/* gain */
+		aw8697_haptic_ram_vbat_comp(aw8697, false);
+		aw8697_haptic_set_gain(aw8697, aw8697->level);
 
 		/* rtp mode config */
 		aw8697_haptic_play_mode(aw8697, AW8697_HAPTIC_RTP_MODE);
@@ -3189,6 +3197,7 @@ static int aw8697_haptics_erase(struct input_dev *dev, int effect_id)
 static void set_gain(struct work_struct * work)
 {
 	struct aw8697 *aw8697 = container_of(work, struct aw8697, set_gain_work);
+	int comp_gain = 0;
 	pr_debug("%s enter set_gain queue work\n", __func__);
 
 	if (aw8697->new_gain >= 0x7FFF)
@@ -3201,7 +3210,22 @@ static void set_gain(struct work_struct * work)
 	if( aw8697->level < 0x1E)
 		aw8697->level = 0x1E; /*30*/
 
-	aw8697_haptic_set_gain(aw8697, aw8697->level);
+	if ((aw8697->activate_mode == AW8697_HAPTIC_ACTIVATE_RAM_LOOP_MODE) &&
+		(aw8697->ram_vbat_comp == AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE) &&
+		aw8697->vbat) {
+		comp_gain = aw8697->level * AW8697_VBAT_REFER / aw8697->vbat;
+		if (comp_gain > (128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN)) {
+			comp_gain = 128 * AW8697_VBAT_REFER / AW8697_VBAT_MIN;
+			pr_debug("%s gain limit=%d\n", __func__, comp_gain);
+		}
+		pr_info("%s: enable vbat comp, level = %x comp_level = %x", __func__,
+			aw8697->level, comp_gain);
+		aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, comp_gain);
+	} else {
+		pr_debug("%s: disable compsensation, vbat=%d, vbat_min=%d, vbat_ref=%d",
+			__func__, aw8697->vbat, AW8697_VBAT_MIN, AW8697_VBAT_REFER);
+		aw8697_i2c_write(aw8697, AW8697_REG_DATDBG, aw8697->level);
+	}
 }
 
 static void aw8697_haptics_set_gain(struct input_dev *dev, u16 gain)
@@ -3654,7 +3678,7 @@ static ssize_t aw8697_gain_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct aw8697 *aw8697 = dev_get_drvdata(dev);
-	return snprintf(buf, PAGE_SIZE, "0x%02x\n", aw8697->gain);
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", aw8697->level);
 }
 
 static ssize_t aw8697_gain_store(struct device *dev,
@@ -3672,8 +3696,8 @@ static ssize_t aw8697_gain_store(struct device *dev,
 	pr_debug("%s: value=%d\n", __FUNCTION__, val);
 
 	mutex_lock(&aw8697->lock);
-	aw8697->gain = val;
-	aw8697_haptic_set_gain(aw8697, aw8697->gain);
+	aw8697->level = val;
+	aw8697_haptic_set_gain(aw8697, aw8697->level);
 	mutex_unlock(&aw8697->lock);
 	return count;
 }
