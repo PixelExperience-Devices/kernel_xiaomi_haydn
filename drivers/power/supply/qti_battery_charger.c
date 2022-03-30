@@ -26,6 +26,9 @@
 #include <drm/mi_disp_notifier.h>
 #include <linux/thermal.h>
 #include <linux/hwid.h>
+#ifdef CONFIG_DEBUG_POWER_MI
+#include <linux/power_debug.h>
+#endif
 #include "qti_typec_class.h"
 
 #define MSG_OWNER_BC			32778
@@ -50,6 +53,7 @@
 #define BC_WLS_FW_UPDATE_STATUS_RESP	0x42
 #define BC_WLS_FW_PUSH_BUF_RESP		0x43
 #define BC_WLS_FW_GET_VERSION		0x44
+#define BC_SHUTDOWN_NOTIFY		0x47
 #define BC_GENERIC_NOTIFY		0x80
 
 /* Generic definitions */
@@ -61,7 +65,11 @@
 #define WLS_FW_BUF_SIZE			128
 #define DEFAULT_RESTRICT_FCC_UA		1000000
 
+#if defined(CONFIG_BQ_FG_1S)
 #define BATTERY_DIGEST_LEN 32
+#else
+#define BATTERY_DIGEST_LEN 20
+#endif
 #define BATTERY_SS_AUTH_DATA_LEN 4
 
 #define ADAP_TYPE_SDP		1
@@ -83,6 +91,7 @@ enum uvdm_state {
 	USBPD_UVDM_AUTHENTICATION,
 	USBPD_UVDM_VERIFIED,
 	USBPD_UVDM_REMOVE_COMPENSATION,
+	USBPD_UVDM_REVERSE_AUTHEN,
 	USBPD_UVDM_CONNECT,
 };
 
@@ -233,12 +242,14 @@ enum xm_property_id {
 	XM_PROP_BT_STATE,
 	XM_PROP_REVERSE_CHG_MODE,
 	XM_PROP_REVERSE_CHG_STATE,
+	XM_PROP_WLS_FW_STATE,
 	XM_PROP_RX_VOUT,
 	XM_PROP_RX_VRECT,
 	XM_PROP_RX_IOUT,
 	XM_PROP_TX_ADAPTER,
 	XM_PROP_OP_MODE,
 	XM_PROP_WLS_DIE_TEMP,
+	XM_PROP_WLS_TX_SPEED,
 	/**********************/
 	XM_PROP_UNK_1,
 	XM_PROP_INPUT_SUSPEND,
@@ -252,16 +263,13 @@ enum xm_property_id {
 	XM_PROP_VDM_CMD_AUTHENTICATION,
 	XM_PROP_VDM_CMD_VERIFIED,
 	XM_PROP_VDM_CMD_REMOVE_COMPENSATION,
+	XM_PROP_VDM_CMD_REVERSE_AUTHEN,
 	XM_PROP_CURRENT_STATE,
 	XM_PROP_ADAPTER_ID,
 	XM_PROP_ADAPTER_SVID,
 	XM_PROP_PD_VERIFED,
 	XM_PROP_PDO2,
 	XM_PROP_UVDM_STATE,
-
-	/* use for MI SMART INTERCHG */
-	XM_PROP_VDM_CMD_SINK_SOC,
-
 	/*****************/
 	XM_PROP_WLS_BIN,
 	XM_PROP_FASTCHGMODE,
@@ -279,6 +287,7 @@ enum xm_property_id {
 	XM_PROP_THERMAL_TEMP,
 	XM_PROP_TYPEC_MODE,
 	XM_PROP_NIGHT_CHARGING,
+	XM_PROP_SMART_BATT,
 	XM_PROP_FG1_QMAX,
 	XM_PROP_FG1_RM,
 	XM_PROP_FG1_FCC,
@@ -445,6 +454,7 @@ struct battery_chg_dev {
 	atomic_t			state;
 	struct work_struct		subsys_up_work;
 	struct work_struct		usb_type_work;
+	struct work_struct		fb_notifier_work;
 	int				fake_soc;
 	bool				block_tx;
 	bool				ship_mode_en;
@@ -467,6 +477,7 @@ struct battery_chg_dev {
 	bool				restrict_chg_en;
 	bool				shutdown_delay_en;
 	bool				support_wireless_charge;
+	bool				support_2s_charging;
 	struct delayed_work		xm_prop_change_work;
 	struct delayed_work		charger_debug_info_print_work;
 	/* To track the driver initialization status */
@@ -529,6 +540,7 @@ static const unsigned int bcdev_usb_extcon_cable[] = {
 	EXTCON_NONE,
 };
 
+/* Standard usb_type definitions similar to power_supply_sysfs.c */
 static const char * const power_supply_usb_type_text[] = {
 	"Unknown", "USB", "USB_DCP", "USB_CDP", "USB_ACA", "USB_C",
 	"USB_PD", "PD_DRP", "PD_PPS", "BrickID", "USB_HVDCP",
@@ -612,7 +624,6 @@ static int battery_chg_write(struct battery_chg_dev *bcdev, void *data,
 				int len)
 {
 	int rc;
-
 	/*
 	 * When the subsystem goes down, it's better to return the last
 	 * known values until it comes back up. Hence, return 0 so that
@@ -635,14 +646,13 @@ static int battery_chg_write(struct battery_chg_dev *bcdev, void *data,
 		if (!rc) {
 			pr_err("Error, timed out sending message\n");
 			mutex_unlock(&bcdev->rw_lock);
-			return -ETIMEDOUT;
 		}
 
 		rc = 0;
 	}
 	mutex_unlock(&bcdev->rw_lock);
 
-	return rc;
+	return 0;
 }
 
 static int write_ss_auth_prop_id(struct battery_chg_dev *bcdev,
@@ -1142,6 +1152,7 @@ static void battery_chg_update_uusb_type(struct battery_chg_dev *bcdev,
 	}
 }
 
+
 static void battery_chg_update_usb_type_work(struct work_struct *work)
 {
 	struct battery_chg_dev *bcdev = container_of(work,
@@ -1195,6 +1206,16 @@ static void battery_chg_update_usb_type_work(struct work_struct *work)
 	}
 
 	battery_chg_update_uusb_type(bcdev, pst->prop[USB_ADAP_TYPE]);
+}
+
+static void battery_chg_fb_notifier_work(struct work_struct *work)
+{
+	struct battery_chg_dev *bcdev = container_of(work,
+					struct battery_chg_dev, fb_notifier_work);
+	int rc;
+
+	rc = write_property_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
+			XM_PROP_FB_BLANK_STATE, bcdev->blank_state);
 }
 
 static void handle_notification(struct battery_chg_dev *bcdev, void *data,
@@ -1414,6 +1435,7 @@ struct quick_charge adapter_cap[11] = {
 #define ADAPTER_XIAOMI_PD_40W     0x0c
 #define ADAPTER_XIAOMI_PD_50W     0x0e
 #define ADAPTER_XIAOMI_PD_60W     0x0f
+#define ADAPTER_XIAOMI_PD_100W    0x10
 static u8 get_quick_charge_type(struct battery_chg_dev *bcdev)
 {
 	int i = 0,verify_digiest = 0;
@@ -1421,6 +1443,7 @@ static u8 get_quick_charge_type(struct battery_chg_dev *bcdev)
 	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_BATTERY];
 	enum power_supply_usb_type		real_charger_type = 0;
 	int		batt_health;
+	u32 apdo_max;
 #if defined(CONFIG_MI_WIRELESS)
 	u32 tx_adapter = 0;
 #endif
@@ -1438,6 +1461,9 @@ static u8 get_quick_charge_type(struct battery_chg_dev *bcdev)
 	rc = read_property_id(bcdev, pst, XM_PROP_PD_VERIFED);
 	verify_digiest = pst->prop[XM_PROP_PD_VERIFED];
 
+	rc = read_property_id(bcdev, pst, XM_PROP_APDO_MAX);
+	apdo_max =  pst->prop[XM_PROP_APDO_MAX];
+
 #if defined(CONFIG_MI_WIRELESS)
 	rc = read_property_id(bcdev, pst, XM_PROP_TX_ADAPTER);
 	tx_adapter = pst->prop[XM_PROP_TX_ADAPTER];
@@ -1447,8 +1473,12 @@ static u8 get_quick_charge_type(struct battery_chg_dev *bcdev)
 	      || (batt_health == POWER_SUPPLY_HEALTH_OVERHEAT) || (batt_health == POWER_SUPPLY_HEALTH_OVERVOLTAGE))
 		return QUICK_CHARGE_NORMAL;
 
-	if (real_charger_type == POWER_SUPPLY_USB_TYPE_PD_PPS && verify_digiest ==1)
-		return QUICK_CHARGE_TURBE;
+	if (real_charger_type == POWER_SUPPLY_USB_TYPE_PD_PPS && verify_digiest == 1) {
+		if (apdo_max >= 120)
+			return QUICK_CHARGE_SUPER;
+		else
+			return QUICK_CHARGE_TURBE;
+	}
 	else if(real_charger_type == POWER_SUPPLY_USB_TYPE_PD_PPS)
 		return QUICK_CHARGE_FAST;
 
@@ -1461,6 +1491,7 @@ static u8 get_quick_charge_type(struct battery_chg_dev *bcdev)
 			return QUICK_CHARGE_TURBE;
 		case ADAPTER_XIAOMI_PD_50W:
 		case ADAPTER_XIAOMI_PD_60W:
+		case ADAPTER_XIAOMI_PD_100W:
 			return QUICK_CHARGE_SUPER;
 		default:
 			return QUICK_CHARGE_FAST;
@@ -1569,8 +1600,8 @@ static enum power_supply_property usb_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_TEMP,
-	POWER_SUPPLY_PROP_SCOPE,
 	POWER_SUPPLY_PROP_QUICK_CHARGE_TYPE,
+	POWER_SUPPLY_PROP_SCOPE,
 };
 
 static enum power_supply_usb_type usb_psy_supported_types[] = {
@@ -1702,6 +1733,18 @@ static int battery_psy_get_prop(struct power_supply *psy,
 			pval->intval = bcdev->fake_soc;*/
 		if(bcdev->fake_soc >= 0 && bcdev->fake_soc <= 100)
 			pval->intval = bcdev->fake_soc;
+
+		/*only for test mode and uncharge state */
+#ifdef CONFIG_DEBUG_POWER_MI
+     if (power_debug_print_enabled())
+         pr_debug(" power_save usb_psy_desc.type=%d, init pval->intval=%d \n",usb_psy_desc.type ,pval->intval);
+	  //if (usb_psy_desc.type == POWER_SUPPLY_TYPE_UNKNOWN)
+	   {
+	     pval->intval = mi_power_save_battery_cave(pval->intval);
+	     if (power_debug_print_enabled())
+			pr_debug(" power_save after pval->intval=%d \n",pval->intval);
+	   }
+#endif
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 #if defined(CONFIG_BQ_FUEL_GAUGE)
@@ -1830,11 +1873,13 @@ static int power_supply_read_temp(struct thermal_zone_device *tzd,
 		rc = read_property_id(bcdev, pst, XM_PROP_THERMAL_TEMP);
 		batt_temp = pst->prop[XM_PROP_THERMAL_TEMP];
 		last_temp = batt_temp;
+		last_read_time = time_now;
 	}
 
-	last_read_time = time_now;
 	*temp = batt_temp * 1000;
-	pr_err("batt_thermal temp:%d ,delta:%ld rc=%d\n",batt_temp,delta, rc);
+	pr_err("batt_thermal temp:%d ,delta:%ld blank_state=%d chg_type=%s tl:=%d  ffc:=%d, pd_verifed:=%d\n",
+		batt_temp,delta, bcdev->blank_state, power_supply_usb_type_text[pst->prop[XM_PROP_REAL_TYPE]],
+		bcdev->curr_thermal_level, pst->prop[XM_PROP_FASTCHGMODE], pst->prop[XM_PROP_PD_VERIFED]);
 	return 0;
 }
 
@@ -2537,9 +2582,19 @@ static ssize_t ship_mode_en_store(struct class *c, struct class_attribute *attr,
 {
 	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
 						battery_class);
+	struct battery_charger_ship_mode_req_msg msg = { { 0 } };
+	int rc =0;
 
 	if (kstrtobool(buf, &bcdev->ship_mode_en))
 		return -EINVAL;
+
+	msg.hdr.owner = MSG_OWNER_BC;
+	msg.hdr.type = MSG_TYPE_REQ_RESP;
+	msg.hdr.opcode = BC_SHIP_MODE_REQ_SET;
+	msg.ship_mode_type = SHIP_MODE_PMIC;
+	rc = battery_chg_write(bcdev, &msg, sizeof(msg));
+	if (rc < 0)
+		pr_err("Failed to write ship mode: %d\n", rc);
 
 	return count;
 }
@@ -2588,6 +2643,10 @@ static ssize_t real_type_show(struct class *c, struct class_attribute *attr,
 	if (rc < 0)
 		return rc;
 
+	/* sanity check to avoid real_type value above maxium 13(USB_FLOAT) to cause kernel crash */
+	if (pst->prop[XM_PROP_REAL_TYPE] > 13)
+		pst->prop[XM_PROP_REAL_TYPE] = 0;
+
 	return scnprintf(buf, PAGE_SIZE, "%s\n", power_supply_usb_type_text[pst->prop[XM_PROP_REAL_TYPE]]);
 }
 static CLASS_ATTR_RO(real_type);
@@ -2614,18 +2673,28 @@ static ssize_t verify_digest_store(struct class *c,
 {
 	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
 						battery_class);
-	u8 random[32] = {0};
-	char kbuf[70] = {0};
+	u8 random[BATTERY_DIGEST_LEN] = {0};
+	char kbuf[2 * BATTERY_DIGEST_LEN + 1] = {0};
+	u8 random_1s[BATTERY_DIGEST_LEN] = {0};
+	char kbuf_1s[70] = {0};
 	int rc;
 	int i;
 
-	memset(kbuf, 0, sizeof(kbuf));
-	strncpy(kbuf, buf, count - 1);
-	StringToHex(kbuf, random, &i);
-	pr_err("verify_digest_store :%s \n", random);
-
-	rc = write_verify_digest_prop_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
+	if (bcdev->support_2s_charging) {
+		memset(kbuf, 0, sizeof(kbuf));
+		strlcpy(kbuf, buf, 2 * BATTERY_DIGEST_LEN + 1);
+		StringToHex(kbuf, random, &i);
+		pr_err("verify_digest_store  2s:%s \n", random);
+		rc = write_verify_digest_prop_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
 				XM_PROP_VERIFY_DIGEST, random);
+	} else {
+		memset(kbuf_1s, 0, sizeof(kbuf_1s));
+		strncpy(kbuf_1s, buf, count - 1);
+		StringToHex(kbuf_1s, random_1s, &i);
+		pr_err("verify_digest_store  1s:%s \n", random_1s);
+		rc = write_verify_digest_prop_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
+				XM_PROP_VERIFY_DIGEST, random_1s);
+	}
 	if (rc < 0)
 		return rc;
 
@@ -3992,6 +4061,36 @@ out:
 }
 static CLASS_ATTR_RW(reverse_chg_mode);
 
+static ssize_t wls_tx_speed_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	int rc;
+	int val;
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+	rc = write_property_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
+				XM_PROP_WLS_TX_SPEED, val);
+	if (rc < 0)
+		return rc;
+	return count;
+}
+static ssize_t wls_tx_speed_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	int rc;
+	rc = read_property_id(bcdev, pst, XM_PROP_WLS_TX_SPEED);
+	if (rc < 0)
+		return rc;
+	return scnprintf(buf, PAGE_SIZE, "%u", pst->prop[XM_PROP_WLS_TX_SPEED]);
+}
+static CLASS_ATTR_RW(wls_tx_speed);
+
 static ssize_t reverse_chg_state_show(struct class *c,
 					struct class_attribute *attr, char *buf)
 {
@@ -4007,6 +4106,22 @@ static ssize_t reverse_chg_state_show(struct class *c,
 	return scnprintf(buf, PAGE_SIZE, "%u", pst->prop[XM_PROP_REVERSE_CHG_STATE]);
 }
 static CLASS_ATTR_RO(reverse_chg_state);
+
+static ssize_t wls_fw_state_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, XM_PROP_WLS_FW_STATE);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%u", pst->prop[XM_PROP_WLS_FW_STATE]);
+}
+static CLASS_ATTR_RO(wls_fw_state);
 
 static ssize_t rx_vout_show(struct class *c,
 					struct class_attribute *attr, char *buf)
@@ -4199,6 +4314,44 @@ static ssize_t night_charging_show(struct class *c,
 }
 static CLASS_ATTR_RW(night_charging);
 
+static ssize_t smart_batt_store(struct class *c,
+					struct class_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	int rc;
+	int val;
+
+	if (kstrtoint(buf, 0, &val))
+		return -EINVAL;
+
+	pr_err("set smart batt charging %d\n", val);
+
+	rc = write_property_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
+				XM_PROP_SMART_BATT, val);
+	if (rc < 0)
+		return rc;
+
+	return count;
+}
+
+static ssize_t smart_batt_show(struct class *c,
+					struct class_attribute *attr, char *buf)
+{
+	struct battery_chg_dev *bcdev = container_of(c, struct battery_chg_dev,
+						battery_class);
+	struct psy_state *pst = &bcdev->psy_list[PSY_TYPE_XM];
+	int rc;
+
+	rc = read_property_id(bcdev, pst, XM_PROP_SMART_BATT);
+	if (rc < 0)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", pst->prop[XM_PROP_SMART_BATT]);
+}
+static CLASS_ATTR_RW(smart_batt);
+
 static ssize_t verify_process_store(struct class *c,
 					struct class_attribute *attr,
 					const char *buf, size_t count)
@@ -4275,6 +4428,12 @@ static void usbpd_request_vdm_cmd(struct battery_chg_dev *bcdev, enum uvdm_state
 		val = *data;
 		pr_err("AUTHENTICATION:data = %d\n", val);
 		break;
+	case USBPD_UVDM_REVERSE_AUTHEN:
+                prop_id = XM_PROP_VDM_CMD_REVERSE_AUTHEN;
+                usbpd_sha256_bitswap32(data, USBPD_UVDM_SS_LEN);
+                val = *data;
+                pr_err("AUTHENTICATION:data = %d\n", val);
+                break;
 	case USBPD_UVDM_REMOVE_COMPENSATION:
 		prop_id = XM_PROP_VDM_CMD_REMOVE_COMPENSATION;
 		val = *data;
@@ -4289,7 +4448,8 @@ static void usbpd_request_vdm_cmd(struct battery_chg_dev *bcdev, enum uvdm_state
 		break;
 	}
 
-	if(cmd == USBPD_UVDM_SESSION_SEED || cmd == USBPD_UVDM_AUTHENTICATION) {
+	if(cmd == USBPD_UVDM_SESSION_SEED || cmd == USBPD_UVDM_AUTHENTICATION
+		|| cmd == USBPD_UVDM_REVERSE_AUTHEN) {
 		rc = write_ss_auth_prop_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
 				prop_id, data);
 	}
@@ -4356,6 +4516,7 @@ static ssize_t request_vdm_cmd_show(struct class *c,
 	  case USBPD_UVDM_SESSION_SEED:
 	  case USBPD_UVDM_VERIFIED:
 	  case USBPD_UVDM_REMOVE_COMPENSATION:
+	  case USBPD_UVDM_REVERSE_AUTHEN:
 	  	return snprintf(buf, PAGE_SIZE, "%d,Null", cmd);
 	  	break;
 	  case USBPD_UVDM_AUTHENTICATION:
@@ -5005,6 +5166,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_bt_state.attr,
 	&class_attr_reverse_chg_mode.attr,
 	&class_attr_reverse_chg_state.attr,
+	&class_attr_wls_fw_state.attr,
 	&class_attr_wireless_chip_fw.attr,
 	&class_attr_wls_bin.attr,
 	&class_attr_rx_vout.attr,
@@ -5014,6 +5176,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_op_mode.attr,
 	&class_attr_wls_die_temp.attr,
 	&class_attr_wls_power_max.attr,
+	&class_attr_wls_tx_speed.attr,
 #endif
 	/*****************************/
 	&class_attr_input_suspend.attr,
@@ -5041,6 +5204,7 @@ static struct attribute *battery_class_attrs[] = {
 	&class_attr_qbg_temp.attr,
 	&class_attr_typec_mode.attr,
 	&class_attr_night_charging.attr,
+	&class_attr_smart_batt.attr,
 	&class_attr_fg1_qmax.attr,
 	&class_attr_fg1_rm.attr,
 	&class_attr_fg1_fcc.attr,
@@ -5102,6 +5266,7 @@ static void generate_xm_charge_uvent(struct work_struct *work)
 		"POWER_SUPPLY_TX_MAC=\n",		//length=20+16
 		"POWER_SUPPLY_RX_CEP=\n",		//length=20+16
 		"POWER_SUPPLY_RX_CR=\n",		//length=19+8
+		"POWER_SUPPLY_WLS_FW_STATE=\n",	//length=26+1
 #endif
 		"POWER_SUPPLY_SOC_DECIMAL=\n",	//length=31+8
 		"POWER_SUPPLY_SOC_DECIMAL_RATE=\n",	//length=31+8
@@ -5117,6 +5282,7 @@ static void generate_xm_charge_uvent(struct work_struct *work)
 		uevent_string[5],
 		uevent_string[6],
 		uevent_string[7],
+		uevent_string[8],
 #endif
 		NULL,
 
@@ -5144,17 +5310,20 @@ static void generate_xm_charge_uvent(struct work_struct *work)
 	rx_cr_show( &(bcdev->battery_class), NULL, prop_buf);
 	strncpy( uevent_string[4]+19, prop_buf,MAX_UEVENT_LENGTH-19);
 
+	wls_fw_state_show( &(bcdev->battery_class), NULL, prop_buf);
+	strncpy( uevent_string[5]+26, prop_buf,MAX_UEVENT_LENGTH-26);
+
 	soc_decimal_show( &(bcdev->battery_class), NULL, prop_buf);
-	strncpy( uevent_string[5]+25, prop_buf,MAX_UEVENT_LENGTH-25);
+	strncpy( uevent_string[6]+25, prop_buf,MAX_UEVENT_LENGTH-25);
 
 	soc_decimal_rate_show( &(bcdev->battery_class), NULL, prop_buf);
-	strncpy( uevent_string[6]+30, prop_buf,MAX_UEVENT_LENGTH-30);
+	strncpy( uevent_string[7]+30, prop_buf,MAX_UEVENT_LENGTH-30);
 
 	shutdown_delay_show( &(bcdev->battery_class), NULL, prop_buf);
-	strncpy( uevent_string[7]+28, prop_buf,MAX_UEVENT_LENGTH-28);
+	strncpy( uevent_string[8]+28, prop_buf,MAX_UEVENT_LENGTH-28);
 
-	dev_err(bcdev->dev,"uevent test : %s\n %s\n %s\n %s\n %s\n %s\n %s\n %s\n",
-			envp[0], envp[1], envp[2], envp[3], envp[4],envp[5], envp[6],envp[7]);
+	dev_err(bcdev->dev,"uevent test : %s\n %s\n %s\n %s\n %s\n %s\n %s\n %s\n %s\n",
+			envp[0], envp[1], envp[2], envp[3], envp[4],envp[5], envp[6],envp[7],envp[8]);
 #else
 	soc_decimal_show( &(bcdev->battery_class), NULL, prop_buf);
 	strncpy( uevent_string[0]+25, prop_buf,MAX_UEVENT_LENGTH-25);
@@ -5288,6 +5457,7 @@ static int battery_chg_parse_dt(struct battery_chg_dev *bcdev)
 	bcdev->thermal_fcc_ua = pst->prop[BATT_CHG_CTRL_LIM_MAX];
 
 	bcdev->support_wireless_charge = of_property_read_bool(node, "mi,support-wireless");
+	bcdev->support_2s_charging  = of_property_read_bool(node, "mi,support-2s-charging");
 
 	return 0;
 }
@@ -5301,7 +5471,6 @@ static int fb_notifier_callback(struct notifier_block *nb,
 						     fb_notifier);
 	struct mi_disp_notifier *evdata = data;
 	unsigned int blank;
-	int rc;
 
 	if(val != MI_DISP_DPMS_EVENT)
 		return NOTIFY_OK;
@@ -5317,10 +5486,7 @@ static int fb_notifier_callback(struct notifier_block *nb,
 			bcdev->blank_state = FB_UNBLANK;
 		}
 
-		rc = write_property_id(bcdev, &bcdev->psy_list[PSY_TYPE_XM],
-				XM_PROP_FB_BLANK_STATE, bcdev->blank_state);
-		if (rc < 0)
-			return rc;
+		schedule_work(&bcdev->fb_notifier_work);
 	}
 	return NOTIFY_OK;
 }
@@ -5424,6 +5590,8 @@ static int battery_chg_probe(struct platform_device *pdev)
 	init_completion(&bcdev->fw_update_ack);
 	INIT_WORK(&bcdev->subsys_up_work, battery_chg_subsys_up_work);
 	INIT_WORK(&bcdev->usb_type_work, battery_chg_update_usb_type_work);
+	INIT_WORK(&bcdev->fb_notifier_work, battery_chg_fb_notifier_work);
+
 	atomic_set(&bcdev->state, PMIC_GLINK_STATE_UP);
 	bcdev->dev = dev;
 
