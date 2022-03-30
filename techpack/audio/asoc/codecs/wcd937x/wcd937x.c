@@ -27,8 +27,6 @@
 #include "internal.h"
 #include "asoc/bolero-slave-internal.h"
 
-#define WCD9370_VARIANT 0
-#define WCD9375_VARIANT 5
 #define WCD937X_VARIANT_ENTRY_SIZE 32
 
 #define NUM_SWRS_DT_PARAMS 5
@@ -2048,15 +2046,24 @@ static int wcd937x_tx_master_ch_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *component =
 				snd_soc_kcontrol_component(kcontrol);
-	struct wcd937x_priv *wcd937x = snd_soc_component_get_drvdata(component);
-	int slave_ch_idx;
+	struct wcd937x_priv *wcd937x = NULL;
+	int slave_ch_idx = -EINVAL;
+
+	if (component == NULL)
+		return -EINVAL;
+
+	wcd937x = snd_soc_component_get_drvdata(component);
+	if (wcd937x == NULL)
+		return -EINVAL;
 
 	wcd937x_tx_get_slave_ch_type_idx(kcontrol->id.name, &slave_ch_idx);
 
-	if (slave_ch_idx != -EINVAL)
-		ucontrol->value.integer.value[0] =
-				wcd937x_slave_get_master_ch_val(
-				wcd937x->tx_master_ch_map[slave_ch_idx]);
+	if (slave_ch_idx < 0 || slave_ch_idx >= WCD937X_MAX_SLAVE_CH_TYPES)
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] =
+			wcd937x_slave_get_master_ch_val(
+			wcd937x->tx_master_ch_map[slave_ch_idx]);
 
 	dev_dbg(component->dev, "%s: ucontrol->value.integer.value[0] = %ld\n",
 			__func__, ucontrol->value.integer.value[0]);
@@ -2068,19 +2075,31 @@ static int wcd937x_tx_master_ch_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *component =
 				snd_soc_kcontrol_component(kcontrol);
-	struct wcd937x_priv *wcd937x = snd_soc_component_get_drvdata(component);
-	int slave_ch_idx;
+	struct wcd937x_priv *wcd937x;
+	int slave_ch_idx = -EINVAL, idx = 0;
+
+	if (component == NULL)
+		return -EINVAL;
+
+	wcd937x = snd_soc_component_get_drvdata(component);
+	if (wcd937x == NULL)
+		return -EINVAL;
 
 	wcd937x_tx_get_slave_ch_type_idx(kcontrol->id.name, &slave_ch_idx);
+
+	if (slave_ch_idx < 0 || slave_ch_idx >= WCD937X_MAX_SLAVE_CH_TYPES)
+		return -EINVAL;
 
 	dev_dbg(component->dev, "%s: slave_ch_idx: %d", __func__, slave_ch_idx);
 	dev_dbg(component->dev, "%s: ucontrol->value.enumerated.item[0] = %ld\n",
 			__func__, ucontrol->value.enumerated.item[0]);
 
-	if (slave_ch_idx != -EINVAL)
-		wcd937x->tx_master_ch_map[slave_ch_idx] =
-				wcd937x_slave_get_master_ch(
-					ucontrol->value.enumerated.item[0]);
+	idx = ucontrol->value.enumerated.item[0];
+	if (idx < 0 || idx >= ARRAY_SIZE(wcd937x_swr_master_ch_map))
+		return -EINVAL;
+
+	wcd937x->tx_master_ch_map[slave_ch_idx] =
+			wcd937x_slave_get_master_ch(idx);
 
 	return 0;
 }
@@ -2602,6 +2621,30 @@ static ssize_t wcd937x_variant_read(struct snd_info_entry *entry,
 static struct snd_info_entry_ops wcd937x_variant_ops = {
 	.read = wcd937x_variant_read,
 };
+
+/*
+ * wcd937x_get_codec_variant
+ * @component: component instance
+ *
+ * Return: codec variant or -EINVAL in error.
+ */
+int wcd937x_get_codec_variant(struct snd_soc_component *component)
+{
+	struct wcd937x_priv *priv = NULL;
+
+	if (!component)
+		return -EINVAL;
+
+	priv = snd_soc_component_get_drvdata(component);
+	if (!priv) {
+		dev_err(component->dev,
+			"%s:wcd937x not probed\n", __func__);
+		return -EINVAL;
+	}
+
+	return priv->variant;
+}
+EXPORT_SYMBOL(wcd937x_get_codec_variant);
 
 /*
  * wcd937x_info_create_codec_entry - creates wcd937x module
