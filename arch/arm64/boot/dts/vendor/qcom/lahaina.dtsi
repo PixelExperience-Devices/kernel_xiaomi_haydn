@@ -2202,7 +2202,6 @@
 			class = "message-queue";
 			direction = "receive";
 			max-size = <0 65536>;
-			shared-buffer = <&chan0_shbuf>;
 			qcom,primary;
 			haven-label = <1>;
 			peer-name = <2>;
@@ -2214,7 +2213,6 @@
 			class = "message-queue";
 			direction = "send";
 			max-size = <0 65536>;
-			shared-buffer = <&chan1_shbuf>;
 			qcom,primary;
 			haven-label = <2>;
 			peer-name = <2>;
