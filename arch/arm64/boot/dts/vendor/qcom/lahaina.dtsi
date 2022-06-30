@@ -2118,6 +2118,11 @@
 			reg = <0x6d0 0xc>;
 		};
 
+		display_config_offset@ba4 {
+			compatible = "qcom,msm-imem-display_config_offset";
+			reg = <0xba4 0x10>;
+		};
+
 		pil@94c {
 			compatible = "qcom,msm-imem-pil";
 			reg = <0x94c 0xc8>;
