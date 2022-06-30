@@ -2237,7 +2237,6 @@
 		qcom,master;
 		haven-label = <3>;
 		peer-name = <2>;
-		shared-buffer = <&qrtr_shbuf>;
 	};
 
 	jtag_mm0: jtagmm@7040000 {
