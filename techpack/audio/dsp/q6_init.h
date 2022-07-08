@@ -23,6 +23,9 @@ static inline int avtimer_init(void)
 	return 0;
 }
 #endif
+#ifdef CONFIG_MSM_CSPL
+int crus_sp_init(void);
+#endif
 #ifdef CONFIG_MSM_MDF
 int msm_mdf_init(void);
 void msm_mdf_exit(void);
@@ -62,6 +65,9 @@ static inline void avtimer_exit(void)
 {
 	return;
 }
+#endif
+#ifdef CONFIG_MSM_CSPL
+void crus_sp_exit(void);
 #endif
 void msm_audio_ion_exit(void);
 void rtac_exit(void);
